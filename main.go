@@ -16,6 +16,7 @@ const (
 	ansiDim    = "\033[2m"
 	ansiItalic = "\033[3m"
 	ansiCyan   = "\033[36m"
+	ansiBold   = "\033[1m"
 )
 
 type generateRequest struct {
@@ -27,6 +28,7 @@ type generateRequest struct {
 
 type generateChunk struct {
 	Response string `json:"response"`
+	Thinking string `json:"thinking"`
 	Done     bool   `json:"done"`
 	Context  []int  `json:"context,omitempty"`
 }
@@ -49,7 +51,11 @@ func main() {
 	scanner := bufio.NewScanner(os.Stdin)
 
 	for {
-		fmt.Printf("%s> %s", ansiCyan, ansiReset)
+		if len(context) > 0 {
+			fmt.Printf("%s(ctx: %d tokens)%s > ", ansiDim, len(context), ansiReset)
+		} else {
+			fmt.Printf("%s>%s ", ansiCyan, ansiReset)
+		}
 		if !scanner.Scan() {
 			fmt.Println()
 			break
@@ -73,6 +79,12 @@ func main() {
 		fmt.Fprintf(os.Stderr, "input error: %v\n", err)
 	}
 }
+
+const (
+	phaseNone     = iota
+	phaseThinking
+	phaseResponse
+)
 
 func generate(apiKey, endpoint, model, prompt string, context []int) ([]int, error) {
 	reqBody, err := json.Marshal(generateRequest{
@@ -103,7 +115,7 @@ func generate(apiKey, endpoint, model, prompt string, context []int) ([]int, err
 		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
 	}
 
-	sp := &streamProcessor{}
+	phase := phaseNone
 	sc := bufio.NewScanner(resp.Body)
 	var newContext []int
 
@@ -116,94 +128,32 @@ func generate(apiKey, endpoint, model, prompt string, context []int) ([]int, err
 		if err := json.Unmarshal(line, &c); err != nil {
 			continue
 		}
-		sp.write(c.Response)
+
+		if c.Thinking != "" && phase != phaseThinking {
+			fmt.Printf("\n%s%s=== Thinking ===%s\n", ansiDim, ansiItalic, ansiReset)
+			phase = phaseThinking
+		}
+
+		if c.Response != "" && phase != phaseResponse {
+			if phase == phaseThinking {
+				fmt.Println()
+			}
+			fmt.Printf("\n%s=== Response ===%s\n", ansiBold, ansiReset)
+			phase = phaseResponse
+		}
+
+		switch phase {
+		case phaseThinking:
+			fmt.Print(ansiDim + ansiItalic + c.Thinking + ansiReset)
+		case phaseResponse:
+			fmt.Print(c.Response)
+		}
+
 		if c.Done {
 			newContext = c.Context
 			break
 		}
 	}
-	sp.flushAll()
 
 	return newContext, sc.Err()
-}
-
-// streamProcessor renders <think>…</think> blocks in dim italic and normal
-// response text in default style, handling tags that may span token boundaries.
-type streamProcessor struct {
-	thinking bool
-	buf      string
-}
-
-const tagOpen = "<think>"
-const tagClose = "</think>"
-
-func (sp *streamProcessor) write(token string) {
-	sp.buf += token
-	sp.drain()
-}
-
-func (sp *streamProcessor) flushAll() {
-	if sp.buf == "" {
-		return
-	}
-	if sp.thinking {
-		fmt.Print(ansiDim + ansiItalic + sp.buf + ansiReset)
-	} else {
-		fmt.Print(sp.buf)
-	}
-	sp.buf = ""
-}
-
-func (sp *streamProcessor) drain() {
-	for {
-		tag := tagOpen
-		if sp.thinking {
-			tag = tagClose
-		}
-
-		idx := strings.Index(sp.buf, tag)
-		if idx >= 0 {
-			before := sp.buf[:idx]
-			if before != "" {
-				if sp.thinking {
-					fmt.Print(ansiDim + ansiItalic + before + ansiReset)
-				} else {
-					fmt.Print(before)
-				}
-			}
-			if sp.thinking {
-				fmt.Print(ansiDim + "\n[/thinking]\n" + ansiReset)
-				sp.thinking = false
-			} else {
-				fmt.Print(ansiDim + "[thinking]\n" + ansiReset)
-				sp.thinking = true
-			}
-			sp.buf = sp.buf[idx+len(tag):]
-			continue
-		}
-
-		// No complete tag found; hold back any partial tag prefix at the end.
-		hold := partialPrefixLen(sp.buf, tag)
-		safe := sp.buf[:len(sp.buf)-hold]
-		if safe != "" {
-			if sp.thinking {
-				fmt.Print(ansiDim + ansiItalic + safe + ansiReset)
-			} else {
-				fmt.Print(safe)
-			}
-		}
-		sp.buf = sp.buf[len(sp.buf)-hold:]
-		return
-	}
-}
-
-// partialPrefixLen returns the length of the longest suffix of s that is also
-// a prefix of tag, so partial tags at the stream boundary are not printed yet.
-func partialPrefixLen(s, tag string) int {
-	for n := len(tag) - 1; n > 0; n-- {
-		if strings.HasSuffix(s, tag[:n]) {
-			return n
-		}
-	}
-	return 0
 }
