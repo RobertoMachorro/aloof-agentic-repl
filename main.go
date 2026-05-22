@@ -17,6 +17,7 @@ const (
 	ansiItalic = "\033[3m"
 	ansiCyan   = "\033[36m"
 	ansiBold   = "\033[1m"
+	ansiRed    = "\033[31m"
 )
 
 type generateRequest struct {
@@ -33,6 +34,22 @@ type generateChunk struct {
 	Context  []int  `json:"context,omitempty"`
 }
 
+type section int
+
+const (
+	sectionNone     section = iota
+	sectionThinking section = iota
+	sectionResponse section = iota
+)
+
+var debugMode = os.Getenv("ALOOF_DEBUG") == "1"
+
+func debugf(format string, args ...any) {
+	if debugMode {
+		fmt.Fprintf(os.Stderr, "[debug] "+format+"\n", args...)
+	}
+}
+
 func main() {
 	apiKey := os.Getenv("ALOOF_API_KEY")
 	endpoint := os.Getenv("ALOOF_ENDPOINT_KEY")
@@ -43,7 +60,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	fmt.Printf("%saloof%s — model: %s\n", ansiCyan, ansiReset, model)
+	fmt.Printf("%saloof%s — model: %s", ansiCyan, ansiReset, model)
+	if debugMode {
+		fmt.Printf("  %s[debug on]%s", ansiRed, ansiReset)
+	}
+	fmt.Println()
 	fmt.Println("Ctrl+C or Ctrl+D to exit.")
 	fmt.Println()
 
@@ -80,12 +101,6 @@ func main() {
 	}
 }
 
-const (
-	phaseNone     = iota
-	phaseThinking
-	phaseResponse
-)
-
 func generate(apiKey, endpoint, model, prompt string, context []int) ([]int, error) {
 	reqBody, err := json.Marshal(generateRequest{
 		Model:   model,
@@ -115,8 +130,10 @@ func generate(apiKey, endpoint, model, prompt string, context []int) ([]int, err
 		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
 	}
 
-	phase := phaseNone
 	sc := bufio.NewScanner(resp.Body)
+	sc.Buffer(make([]byte, 256*1024), 256*1024)
+
+	current := sectionNone
 	var newContext []int
 
 	for sc.Scan() {
@@ -124,36 +141,56 @@ func generate(apiKey, endpoint, model, prompt string, context []int) ([]int, err
 		if len(line) == 0 {
 			continue
 		}
+
 		var c generateChunk
 		if err := json.Unmarshal(line, &c); err != nil {
+			debugf("unmarshal error: %v  raw: %s", err, line)
 			continue
 		}
+		debugf("chunk: thinking=%q response=%q done=%v", c.Thinking, c.Response, c.Done)
 
-		if c.Thinking != "" && phase != phaseThinking {
-			fmt.Printf("\n%s%s=== Thinking ===%s\n", ansiDim, ansiItalic, ansiReset)
-			phase = phaseThinking
+		// Determine which section this chunk belongs to based on payload content.
+		var incoming section
+		switch {
+		case c.Thinking != "":
+			incoming = sectionThinking
+		case c.Response != "":
+			incoming = sectionResponse
 		}
 
-		if c.Response != "" && phase != phaseResponse {
-			if phase == phaseThinking {
-				fmt.Println()
+		// Print section header on transitions.
+		if incoming != sectionNone && incoming != current {
+			switch incoming {
+			case sectionThinking:
+				fmt.Printf("\n%s%s=== Thinking ===%s\n", ansiDim, ansiItalic, ansiReset)
+			case sectionResponse:
+				if current == sectionThinking {
+					fmt.Println()
+				}
+				fmt.Printf("\n%s=== Response ===%s\n", ansiBold, ansiReset)
 			}
-			fmt.Printf("\n%s=== Response ===%s\n", ansiBold, ansiReset)
-			phase = phaseResponse
+			debugf("section: %d → %d", current, incoming)
+			current = incoming
 		}
 
-		switch phase {
-		case phaseThinking:
+		// Print content for the active section.
+		switch current {
+		case sectionThinking:
 			fmt.Print(ansiDim + ansiItalic + c.Thinking + ansiReset)
-		case phaseResponse:
+		case sectionResponse:
 			fmt.Print(c.Response)
 		}
 
 		if c.Done {
 			newContext = c.Context
+			debugf("done: context_len=%d final_section=%d", len(newContext), current)
 			break
 		}
 	}
+	if err := sc.Err(); err != nil {
+		debugf("scanner error: %v", err)
+		return newContext, err
+	}
 
-	return newContext, sc.Err()
+	return newContext, nil
 }

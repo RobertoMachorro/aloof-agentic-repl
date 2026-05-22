@@ -15,6 +15,7 @@ All configuration is via environment variables:
 | `ALOOF_API_KEY` | Bearer token for the API endpoint | `e3b0c44298fc1c149a...` |
 | `ALOOF_ENDPOINT_KEY` | Full URL of the `/api/generate` endpoint | `https://ai.example.com/api/generate` |
 | `ALOOF_ENDPOINT_MODEL` | Model name to use | `deepseek-r1:1.5b` |
+| `ALOOF_DEBUG` | Set to `1` to print raw chunk data to stderr | `1` |
 
 ## Usage
 
